@@ -1,0 +1,81 @@
+name: Restore Database and Screenshots
+
+# Manual only, on purpose — this is destructive. Trigger it from the Actions
+# tab (Actions > Restore Database and Screenshots > Run workflow), or via the
+# in-app Backups panel's Restore button (which calls the github-backup Edge
+# Function, which dispatches this workflow with the inputs below).
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to restore (e.g. backup-20260709-060000) — see the Releases page for available tags'
+        required: true
+      confirm:
+        description: 'Type RESTORE (all caps) to confirm — this overwrites current data and screenshots with the chosen backup'
+        required: true
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm intent
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "RESTORE" ]; then
+            echo "Confirmation text did not match 'RESTORE'. Aborting — nothing was changed."
+            exit 1
+          fi
+
+      - name: Install postgresql-client 17 (matches Supabase's Postgres version)
+        run: |
+          sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+          # AWS CLI v2 is preinstalled on GitHub-hosted runners — no apt install needed here.
+
+      - name: Download backup release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ github.event.inputs.release_tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "*.tar.gz" \
+            --output backup.tar.gz
+          mkdir -p restore
+          # backup.yml tars the CONTENTS of its backup/ folder directly (tar -czf ... -C backup .),
+          # so this extracts to a flat restore/database.dump + restore/storage/ — no wrapping
+          # backup-*/ subdirectory to find.
+          tar -xzf backup.tar.gz -C restore
+
+      - name: Restore database (drops and recreates tables exactly as backed up)
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          # -n public matches the scoped dump in backup.yml — restricts restore to
+          # YOUR app's tables. Supabase's own schemas (auth, storage, realtime, etc.)
+          # were never in the dump and must never be touched by this restore.
+          /usr/lib/postgresql/17/bin/pg_restore --clean --if-exists -n public -d "$DATABASE_URL" restore/database.dump
+
+      - name: Re-grant standard Supabase role privileges
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          /usr/lib/postgresql/17/bin/psql "$DATABASE_URL" <<'SQL'
+          grant usage on schema public to anon, authenticated, service_role;
+          grant all on all tables in schema public to anon, authenticated, service_role;
+          grant all on all sequences in schema public to anon, authenticated, service_role;
+          grant all on all functions in schema public to anon, authenticated, service_role;
+          SQL
+
+      - name: Restore screenshots (mirrors the bucket to match the backup exactly)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SUPABASE_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SUPABASE_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.SUPABASE_S3_REGION }}
+        run: |
+          aws s3 sync restore/storage "s3://${{ secrets.SUPABASE_S3_BUCKET }}" \
+            --endpoint-url "${{ secrets.SUPABASE_S3_ENDPOINT }}" \
+            --delete
+
+      - name: Done
+        run: echo "Restore complete from ${{ github.event.inputs.release_tag }}"

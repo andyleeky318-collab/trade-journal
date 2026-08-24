@@ -1,0 +1,31 @@
+name: Sync Market Calendar
+
+on:
+  schedule:
+    - cron: '0 5 * * 1' # weekly, Monday 05:00 UTC
+  workflow_dispatch: {} # on-demand
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger market-calendar-sync Edge Function
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          # This function has verify_jwt = false (see supabase/config.toml), so
+          # the platform gateway doesn't check Authorization at all. Instead the
+          # function itself checks this shared secret in the apikey header —
+          # must match the MARKET_SYNC_SHARED_SECRET Supabase function secret.
+          MARKET_SYNC_SHARED_SECRET: ${{ secrets.MARKET_SYNC_SHARED_SECRET }}
+        run: |
+          response=$(curl -s -w "\n%{http_code}" -X POST \
+            "$SUPABASE_URL/functions/v1/market-calendar-sync" \
+            -H "apikey: $MARKET_SYNC_SHARED_SECRET" \
+            -H "Content-Type: application/json")
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+          echo "$body"
+          if [ "$http_code" -ge 300 ]; then
+            echo "Sync failed with HTTP $http_code"
+            exit 1
+          fi

@@ -1,0 +1,76 @@
+name: Backup Supabase
+
+# Manual trigger only (workflow_dispatch): fired either by the in-app "Back Up
+# Now" button (via the github-backup Edge Function) or by you directly from
+# the Actions tab. If you want this to also run automatically overnight, see
+# the setup guide's optional "Automated daily backups" section, which sets
+# this up via a small Cloudflare Worker instead of GitHub's own `schedule:`
+# trigger (which GitHub documents as best-effort and occasionally delayed or
+# skipped).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Postgres 17 client (PGDG)
+        run: |
+          sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+          # AWS CLI v2 ships preinstalled on GitHub-hosted runners — no install needed here.
+          aws --version
+
+      - name: Dump database
+        env:
+          # Session Pooler connection string (IPv4-compatible) from
+          # Supabase Dashboard > Settings > Database > Connection string > Session pooler.
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          mkdir -p backup
+          # -n public restricts the dump to YOUR app's tables only. Supabase's own
+          # schemas (auth, storage, realtime, vault, extensions, pgbouncer, graphql)
+          # are managed internally by the platform and owned by Supabase's own
+          # system roles (not the role this connection string authenticates as) —
+          # they must never be dumped or restored by us, or a restore fails with a
+          # wall of "must be owner of..." errors.
+          # NOTE: do NOT pass --no-privileges — it strips Supabase's role grants
+          # on YOUR public-schema tables and causes "permission denied for schema
+          # public" on restore.
+          /usr/lib/postgresql/17/bin/pg_dump "$DATABASE_URL" -Fc -n public -f backup/database.dump
+
+      - name: Sync Storage objects
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SUPABASE_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SUPABASE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          mkdir -p backup/storage
+          aws s3 sync "s3://${{ secrets.SUPABASE_S3_BUCKET }}" backup/storage \
+            --endpoint-url "${{ secrets.SUPABASE_S3_ENDPOINT }}"
+
+      - name: Bundle backup
+        id: bundle
+        run: |
+          TAG="backup-$(date -u +%Y%m%d-%H%M%S)"
+          tar -czf "${TAG}.tar.gz" -C backup .
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Publish as GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.bundle.outputs.tag }}" \
+            "${{ steps.bundle.outputs.tag }}.tar.gz" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "${{ steps.bundle.outputs.tag }}" \
+            --notes "Automated backup (database + storage)."
+
+      - name: Prune old backups (keep 30 most recent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            | awk '{print $1}' | grep '^backup-' | sort -r | tail -n +31 \
+            | xargs -r -I{} gh release delete {} --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag

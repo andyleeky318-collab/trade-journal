@@ -1,0 +1,25 @@
+name: Deploy market-calendar-sync Edge Function
+
+# This function needs `verify_jwt = false` (see supabase/config.toml), which
+# only takes effect when deployed via the Supabase CLI — the dashboard's
+# editor always deploys with verify_jwt on. Run this workflow once after
+# first creating supabase/functions/market-calendar-sync/index.ts, and again
+# any time you edit that file.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Supabase CLI
+        run: npm install -g supabase
+
+      - name: Deploy market-calendar-sync function
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          supabase functions deploy market-calendar-sync --project-ref "$SUPABASE_PROJECT_REF"
