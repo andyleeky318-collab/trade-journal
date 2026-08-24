@@ -1,0 +1,12 @@
+# Only the market-calendar-sync function needs an entry here. All other
+# functions (ai-summary, rollup-summary, github-backup) use Supabase's default
+# JWT verification and are deployed via the dashboard editor as usual.
+#
+# verify_jwt = false lets market-calendar-sync be called by a GitHub Actions
+# workflow (which has no Supabase user session) using only a shared secret it
+# checks itself — see supabase/functions/market-calendar-sync/index.ts for how.
+# This value can only be set via this config file + the Supabase CLI, not the
+# dashboard's "create new function" screen — see the setup guide for the
+# `supabase functions deploy` command that applies it.
+[functions.market-calendar-sync]
+verify_jwt = false

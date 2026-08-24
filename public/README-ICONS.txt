@@ -1,0 +1,1 @@
+Add your own favicon.ico, favicon-16x16.png, favicon-32x32.png, apple-touch-icon.png, android-chrome-192x192.png, and android-chrome-512x512.png here (any free favicon generator works, e.g. realfavicongenerator.net). The app runs fine without them; browsers just show a default icon.
